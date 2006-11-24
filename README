@@ -1,0 +1,53 @@
+ICMP Module for NaviServer 4.x
+Release 1.0
+vlad@crystalballinc.com
+
+This is NaviServer module that implements ICMP protocol or
+pings that can be used for monitoring connectivity.
+
+/*--------------------------------------------------------------------*/
+
+Configuring
+
+Here is an nsd.tcl excerpt for configuring the ICMP module:
+
+ns_section      ns/server/${servername}/module/nsicmp
+ns_param	timeout		 2
+ns_param	count		 3
+ns_param	size		 56
+ns_param	sockets	 	 1
+
+sockets is to pre-allocated specified number of raw sockets
+for ICMP pings.
+
+    ns_ping host -count n -timeout n -size n -alert 0|1 -debug 0|1 -wait n
+
+      performs ICMP ECHO queries of one host
+      where
+        -count n specifies to send n ICMP packets
+        -timeout n specifies to wait n seconds for reply
+        -size n specifies n bytes of data to be sent
+        -alert if set to 0 will not fire Tcl exception, will just
+               return the result
+        -debug is set to 1 will produce log with more info about pings
+        -wait defines number of seconds to wait, this is total wait time
+        -name can be used to be returned in the reply instead of host, also if at least
+              1 name present in parameters, result will include name or host
+
+      returns the following Tcl list:
+       { requests_sent requests_received loss_percentage rtt_min rtt_avg rtt_max }
+
+
+    ns_ping host -alert 0|1 -debug 0|1 -count n -timeout n -size n -wait n -name n ?host -...? ?host -...?
+
+       sends pings to multiple hosts at once. For each host the following
+       parameters apply to previous host only. Returns result for each host specified, maximum
+       timeout will define the longest execution time of multiple ping.
+
+      returns the following Tcl list of lists:
+       { { host|name requests_sent requests_received loss_percentage rtt_min rtt_avg rtt_max } ... }
+   
+Authors
+
+     Vlad Seryakov vlad@crystalballinc.com
+
