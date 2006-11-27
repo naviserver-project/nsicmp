@@ -222,11 +222,12 @@ static IcmpPort *IcmpLock(Server * server)
     int status = NS_OK;
 
     Ns_GetTime(&timeout);
-    timeout.sec += 30;
+    Ns_IncrTime(&timeout, 2, 0);
+
     // Get next available socket
     Ns_MutexLock(&server->mutex);
     while (status == NS_OK && !(port = server->head)) {
-        Ns_CondTimedWait(&server->cond, &server->mutex, &timeout);
+        status = Ns_CondTimedWait(&server->cond, &server->mutex, &timeout);
     }
     if (port != NULL) {
         server->head = port->next;
