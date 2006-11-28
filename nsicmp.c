@@ -66,13 +66,12 @@
 
 #define timediff(t1, t2) ((double)(t2.tv_sec - t1.tv_sec) * 1000.0 + (double)(t2.tv_usec - t1.tv_usec) / 1000.0)
 #define stimediff(t1, t2) ((double)(t2.tv_sec - t1.tv_sec) + (double)(t2.tv_usec - t1.tv_usec) / 1000000.0)
-
+#define freeports(p)  while (p) { IcmpPort *next = p->next; ns_free(p); p = next; }
 
 typedef struct _icmpPort {
     struct _icmpPort *next, *prev;
     int fd;
     int id;
-    int idx;
     int count;
     int timeout;
     int sent;
@@ -314,13 +313,18 @@ static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
     struct icmp *icp;
     struct timeval tv;
     time_t start_time;
-    struct pollfd *pfds;
+    struct pollfd pfds[1];
     struct sockaddr_in sa;
-    int i, nfds, mintime, len, hlen, loss;
-    IcmpPort *port, *ports = NULL;
+    int i, nports, nwait, len, hlen, loss;
+    IcmpPort *sock, *port, *ports = NULL;
     socklen_t slen = sizeof(struct sockaddr);
     int count = server->count, size = server->size, timeout = server->timeout;
-    int alert = 1, wait = 0, debug = 0, names = 0, nports = 0;
+    int alert = 1, wait = 0, debug = 0, names = 0;
+
+    if ((sock = IcmpLock(server)) == NULL) {
+        Tcl_AppendResult(interp, "noResources: no ICMP sockets", 0);
+        return TCL_ERROR;
+    }
 
     for (i = 1; i < objc; i++) {
         if (!strcmp(Tcl_GetString(objv[i]), "-alert")) {
@@ -378,46 +382,43 @@ static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
             i++;
         } else
         if (!strcmp(Tcl_GetString(objv[i]), "-name")) {
-            if (i < objc - 1 && port != NULL) {
-                port->name = Tcl_GetString(objv[i + 1]);
+            if (i < objc - 1 && ports != NULL) {
+                ports->name = Tcl_GetString(objv[i + 1]);
                 // If name is given, return full format
                 names = 1;
             }
             i++;
         } else {
-           if ((port = IcmpLock(server)) == NULL) {
-               Tcl_AppendResult(interp, "noResources: no ICMP socket for ", Tcl_GetString(objv[i]), 0);
-               IcmpUnlock(server, ports);
-               return TCL_ERROR;
-           }
            // Add to the list of sockets
+           port = ns_calloc(1, sizeof(IcmpPort));
            port->next = ports;
            ports = port;
-           nports++;
+           ports->fd = sock->fd;
+           ports->id = sock->id;
+           ports->count = count;
+           ports->timeout = timeout;
+           ports->host = Tcl_GetString(objv[i]);
            // If multiple hosts, return with names
            names = ports->next ? 1 : 0;
-           port->count = count;
-           port->timeout = timeout;
-           port->host = Tcl_GetString(objv[i]);
            // Resolve given host name
-           if (Ns_GetSockAddr(&port->sa, port->host, 0) != NS_OK) {
-               Tcl_AppendResult(interp, "noHost: unknown host ", port->host, 0);
-               IcmpUnlock(server, ports);
+           if (Ns_GetSockAddr(&ports->sa, ports->host, 0) != NS_OK) {
+               Tcl_AppendResult(interp, "noHost: unknown host ", ports->host, 0);
+               IcmpUnlock(server, sock);
+               freeports(ports);
                return TCL_ERROR;
            }
         }
     }
     if (ports == NULL) {
         Tcl_AppendResult(interp, "no hosts specified", 0);
+        IcmpUnlock(server, sock);
         return TCL_ERROR;
     }
     start_time = time(0);
-    pfds = ns_malloc(sizeof(struct pollfd) * nports);
 
     while (1) {
 
-        nfds = 0;
-        mintime = timeout;
+        nports = 0;
 
         for (port = ports; port; port = port->next) {
              gettimeofday(&tv, 0);
@@ -428,14 +429,9 @@ static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
                  if (elapsed > port->timeout && port->sent == port->count) {
                      continue;
                  }
-                 // We still can wait for packets for this port
-                 mintime = MIN(mintime, port->timeout - elapsed);
-                 pfds[nfds].fd = port->fd;
-                 pfds[nfds].events = POLLIN;
-                 pfds[nfds].revents = 0;
-                 port->idx = nfds++;
+                 nports++;
              }
-             if (port->sent < port->count && (port->sent == port->received || elapsed < port->timeout)) {
+             if (port->sent < port->count && (port->sent == port->received || elapsed >= port->timeout)) {
                  icp = (struct icmp *) buf;
                  icp->icmp_type = ICMP_ECHO;
                  icp->icmp_code = 0;
@@ -461,71 +457,74 @@ static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
         }
 
         // Check the total time we spent pinging
-        if (!nfds || (wait > 0 && time(0) - start_time > wait)) {
+        if (!nports || (wait > 0 && time(0) - start_time > wait)) {
             break;
         }
-
+        pfds[0].fd = sock->fd;
+        pfds[0].events = POLLIN;
+        pfds[0].revents = 0;
+        nwait = 500;
+again:
         do {
-            len = ns_poll(pfds, nfds, (mintime > 0 ? mintime : 1) * 1000);
+            len = ns_poll(pfds, 1, nwait);
         } while (len < 0  && errno == EINTR);
 
-        for (port = ports; port; port = port->next) {
-            if (!(pfds[port->idx].revents & POLLIN)) {
-                continue;
-            }
-            gettimeofday(&tv, 0);
-            // Receive reply packet and parse it
-            if ((len = recvfrom(port->fd, buf, sizeof(buf), 0, (struct sockaddr *) &sa, &slen)) <= 0) {
-                Ns_Log(Error, "ns_ping: %d/%d: %s: recvfrom error: %s", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), strerror(errno));
-                continue;
-            }
-            // IP header
-            ip = (struct ip *) buf;
-            if (len < (hlen = ip->ip_hl << 2) + ICMP_MINLEN) {
-                if (debug) {
-                    Ns_Log(Notice, "ns_ping: %d/%d: %s: corrupted packet,  %d", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), len);
-                }
-                continue;
-            }
-            // ICMP header
-            icp = (struct icmp *) (buf + hlen);
+        if (len <= 0) {
+            continue;
+        }
+        gettimeofday(&tv, 0);
+        // Receive reply packet and parse it
+        if ((len = recvfrom(sock->fd, buf, sizeof(buf), 0, (struct sockaddr *) &sa, &slen)) <= 0) {
+            Ns_Log(Error, "ns_ping: %d/%d: recvfrom error: %s", sock->id, sock->fd, strerror(errno));
+            continue;
+        }
+        // IP header
+        ip = (struct ip *) buf;
+        if (len < (hlen = ip->ip_hl << 2) + ICMP_MINLEN) {
             if (debug) {
-                Ns_Log(Notice, "ns_ping: %d/%d: %s: received from %s %d bytes, type %d, id %d, seq %d, sent %d, received %d", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), inet_ntoa(sa.sin_addr), len, icp->icmp_type, icp->icmp_id, icp->icmp_seq, port->sent, port->received);
+                Ns_Log(Notice, "ns_ping: %d/%d: corrupted packet from %s, %d bytes", sock->id, sock->fd, ns_inet_ntoa(sa.sin_addr), len);
             }
-            // It may come from different host
-            if (port->sa.sin_addr.s_addr != sa.sin_addr.s_addr) {
-                if (debug) {
-                    Ns_Log(Notice, "ns_ping: %d/%d: %s: invalid %s, type %d, last sent %.2f secs ago", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), inet_ntoa(sa.sin_addr), icp->icmp_type, stimediff(port->send_time, tv));
+            goto again;
+        }
+        // ICMP header
+        icp = (struct icmp *) (buf + hlen);
+        if (debug) {
+            Ns_Log(Notice, "ns_ping: %d/%d: received from %s %d bytes, type %d, id %d, seq %d", sock->id, sock->fd, ns_inet_ntoa(sa.sin_addr), len, icp->icmp_type, icp->icmp_id, icp->icmp_seq);
+        }
+        // Wrong packet
+        if (icp->icmp_type != ICMP_ECHOREPLY || icp->icmp_id != sock->id) {
+            if (debug) {
+                Ns_Log(Notice, "ns_ping: %d/%d: invalid type %d or id %d from %s", sock->id, sock->fd, icp->icmp_type, icp->icmp_id, ns_inet_ntoa(sa.sin_addr));
+            }
+            goto again;
+        }
+        // Find the host
+        for (port = ports; port; port = port->next) {
+            if (port->sa.sin_addr.s_addr == sa.sin_addr.s_addr && port->received < port->sent) {
+                gettimeofday(&port->recv_time, 0);
+                // Take send time from the ICMP header
+                memcpy(&tv, &buf[hlen + 8], sizeof(struct timeval));
+                // Calculate round trip time
+                elapsed = timediff(tv, port->recv_time);
+                if (!port->rtt_min || elapsed < port->rtt_min) {
+                    port->rtt_min = elapsed;
                 }
-                continue;
-            }
-            // Wrong packet
-            if (icp->icmp_type != ICMP_ECHOREPLY || icp->icmp_id != port->id) {
-                if (debug) {
-                    Ns_Log(Notice, "ns_ping: %d/%d: %s: invalid type %d or id %d", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), icp->icmp_type, icp->icmp_id);
+                if (!port->rtt_max || elapsed > port->rtt_max) {
+                    port->rtt_max = elapsed;
                 }
-                continue;
+                port->received++;
+                port->rtt_avg = (port->rtt_avg * (port->received - 1) / port->received) + (elapsed / port->received);
+                nwait = 0;
+                goto again;
             }
-            port->received++;
-            gettimeofday(&port->recv_time, 0);
-            // Take send time from the ICMP header
-            memcpy(&tv, &buf[hlen + 8], sizeof(struct timeval));
-            // Calculate round trip time
-            elapsed = timediff(tv, port->recv_time);
-            if (!port->rtt_min || elapsed < port->rtt_min) {
-                port->rtt_min = elapsed;
-            }
-            if (!port->rtt_max || elapsed > port->rtt_max) {
-                port->rtt_max = elapsed;
-            }
-            port->rtt_avg = (port->rtt_avg * (port->received - 1) / port->received) + (elapsed / port->received);
         }
     }
-    ns_free(pfds);
+    IcmpUnlock(server, sock);
+
     // In case of one host, fire exception, no result
     if (alert && !ports->received && !ports->next) {
         Tcl_AppendResult(interp, "noConnectivity: no reply from ", ns_inet_ntoa(ports->sa.sin_addr), 0);
-        IcmpUnlock(server, ports);
+        freeports(ports);
         return TCL_ERROR;
     }
 
@@ -547,7 +546,7 @@ static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
          Tcl_ListObjAppendElement(interp, obj, Tcl_NewDoubleObj(port->rtt_avg));
          Tcl_ListObjAppendElement(interp, obj, Tcl_NewDoubleObj(port->rtt_max));
     }
-    IcmpUnlock(server, ports);
+    freeports(ports);
     return TCL_OK;
 }
 
