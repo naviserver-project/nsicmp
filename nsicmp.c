@@ -99,9 +99,10 @@ typedef struct _server {
     IcmpPort *tail;
 } Server;
 
-static int IcmpInterpInit(Tcl_Interp * interp, void *arg);
 static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
 static int IcmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
+
+static Ns_TclTraceProc IcmpInterpInit;
 
 NS_EXPORT int Ns_ModuleVersion = 1;
 
@@ -124,7 +125,7 @@ NS_EXPORT int Ns_ModuleVersion = 1;
 
 NS_EXPORT int Ns_ModuleInit(char *server, char *module)
 {
-    char *path;
+    const char *path;
     Server *srvPtr;
     IcmpPort *icmp;
     int i, sock;
@@ -186,10 +187,10 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
  *
  *----------------------------------------------------------------------
  */
-static int IcmpInterpInit(Tcl_Interp * interp, void *arg)
+static int IcmpInterpInit(Tcl_Interp * interp, const void *arg)
 {
-    Tcl_CreateObjCommand(interp, "ns_ping", PingCmd, arg, NULL);
-    Tcl_CreateObjCommand(interp, "ns_icmp", IcmpCmd, arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_ping", PingCmd, (ClientData) arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_icmp", IcmpCmd, (ClientData) arg, NULL);
     return NS_OK;
 }
 

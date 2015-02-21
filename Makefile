@@ -10,6 +10,6 @@ MOD      =  nsicmp.so
 #
 # Objects to build.
 #
-OBJS     = nsicmp.o
+MODOBJS     = nsicmp.o
 
 include  $(NAVISERVER)/include/Makefile.module
