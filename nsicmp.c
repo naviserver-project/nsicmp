@@ -123,7 +123,7 @@ NS_EXPORT int Ns_ModuleVersion = 1;
  *----------------------------------------------------------------------
  */
 
-NS_EXPORT int Ns_ModuleInit(char *server, char *module)
+NS_EXPORT Ns_ReturnCode Ns_ModuleInit(char *server, char *module)
 {
     const char *path;
     Server *srvPtr;
@@ -187,7 +187,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
  *
  *----------------------------------------------------------------------
  */
-static int IcmpInterpInit(Tcl_Interp * interp, const void *arg)
+static Ns_ReturnCode IcmpInterpInit(Tcl_Interp * interp, const void *arg)
 {
     Tcl_CreateObjCommand(interp, "ns_ping", PingCmd, (ClientData) arg, NULL);
     Tcl_CreateObjCommand(interp, "ns_icmp", IcmpCmd, (ClientData) arg, NULL);
